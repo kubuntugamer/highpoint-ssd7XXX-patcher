@@ -65,7 +65,7 @@ Before rebooting, you must inject and compile the patched driver tree into the f
    sudo umount -R /mnt
    sudo reboot
    ```
-#################################### Fuck You Highpoint ###########################################
+########## Fuck You Highpoint ##########
 ---
 
 ## Technical Architecture Matrix
