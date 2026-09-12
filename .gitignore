@@ -1,6 +1,0 @@
-hpt_source/
-hpt_archive_scratch/
-*.tar.gz
-*.bin
-*.log
-fix_permissions.sh
