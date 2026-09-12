@@ -15,7 +15,7 @@ An automated, cross-generation out-of-tree kernel deployment utility for the Hig
 
 1. Acquire the source repository structure on your machine:
    ```bash
-   git clone https://github.com
+   git clone https://github.com](https://github.com/kubuntugamer/highpoint-ssd7XXX-patcher.git
    cd highpoint-ssd7505-patcher
    ```
 2. Execute the patcher utility natively:
