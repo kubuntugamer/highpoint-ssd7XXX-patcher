@@ -1,7 +1,7 @@
 #!/bin/bash
 # -------------------------------------------------------------------------
 # HighPoint SSD7505 Linux Multi-Kernel Build & Deployment Wizard
-# 100% Legal / Multi-Format / Comprehensive Deep Recursive Home Space Scan
+# Multi-Format / Comprehensive Deep Recursive Home Space Scan
 # -------------------------------------------------------------------------
 set -e
 
