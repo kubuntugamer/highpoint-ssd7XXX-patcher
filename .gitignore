@@ -1,0 +1,4 @@
+# HighPoint vendor payload — license restricts redistribution, and the README
+# documents the manual download flow the patcher expects. Keep it local.
+HighPoint_NVMe_G5_Linux_Src_*.tar.gz
+hptnvme_g5_linux_src_*.bin
