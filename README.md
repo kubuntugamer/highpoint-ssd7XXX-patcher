@@ -68,6 +68,92 @@ Before rebooting, you must inject and compile the patched driver tree into the f
 
 ---
 
+## Verified Diagnostics
+
+Captured on a live test host after the DKMS path fix (issue #1), proving the patcher stages, patches, builds,
+installs and runs the driver end-to-end.
+
+**Host:** Dell OptiPlex 3020, BIOS A20, kernel `7.3.0-10-generic`, dkms 3.2.2, no EFI variables / no Secure Boot.
+**Hardware:** HighPoint SSD7505 (PCI `1103:7505`) + 4x 4TB Sabrent Rocket Q (Phison E12) behind the onboard
+PLX switch, configured as a bootable RAID-0.
+
+### 1. Build and install
+
+```
+$ dkms status
+hptnvme/1.6.22.0, 7.3.0-10-generic, x86_64: installed
+
+$ sudo dkms build -m hptnvme -v 1.6.22.0 -k 7.3.0-10-generic
+Running the pre_build script... done.
+Building module(s)..... done.
+Signing module /var/lib/dkms/hptnvme/1.6.22.0/build/hpt_source/product/hptnvme/linux/hptnvme.ko
+
+$ modinfo hptnvme | grep -E '^(filename|version|license)'
+filename:       /lib/modules/7.3.0-10-generic/updates/dkms/hptnvme.ko.zst
+version:        1.6.22.0
+license:        Proprietary
+```
+
+The `.ko` lands in `hpt_source/product/hptnvme/linux/` (not `.build/`), which is what the corrected
+`BUILT_MODULE_LOCATION` points at.
+
+### 2. Module load and controller probe
+
+```
+$ sudo modprobe hptnvme
+hptnvme: HighPoint NVMe RAID controller driver (G5) v1.6.22.0 block major fb
+hptnvme: [01      ] Verify controller success (retry:0).
+scsi host8: hptnvme
+hptnvme: [        ] probe vbus
+```
+
+> **Critical binding detail:** the four member drives must belong to `hptnvme`, not the generic `nvme`
+> driver. The module registers a class-wide alias (`pci:v*d*sv*sd*bc01sc08i02*`) and will claim every NVMe
+> endpoint, but the kernel never rebinds a device that is already in use. With only the HBA function
+> (`0b:00.0`) bound, the driver logs `probe vbus` and stalls with no volume. Releasing the members makes it
+> assemble the set immediately:
+>
+> ```
+> echo 0000:05:00.0 | sudo tee /sys/bus/pci/drivers/nvme/unbind
+> echo 0000:05:00.0 | sudo tee /sys/bus/pci/drivers/hptnvme/bind
+> # ...repeat for 06:00.0, 07:00.0, 08:00.0
+> ```
+
+### 3. Array assembled and visible
+
+```
+hptnvme: [05      ] probe controller
+hptnvme: [06      ] probe controller
+hptnvme: [07      ] probe controller
+hptnvme: [08      ] probe controller
+hptnvme: [08      ] HBA is probing (state: 0)
+
+$ lsblk -o NAME,SIZE,TYPE,FSTYPE
+NAME              SIZE TYPE FSTYPE
+hptblock8n0p     14.6T disk
+├─hptblock8n0p1   300M part vfat      # ESP
+└─hptblock8n0p2  14.6T part xfs       # LABEL=kubuntu_2404
+
+$ sudo blkid /dev/hptblock8n0p2
+/dev/hptblock8n0p2: LABEL="kubuntu_2404" UUID="2c207cb7-1be6-43d2-8592-ed30457e2b13" TYPE="xfs"
+```
+
+4x 4TB in RAID-0 → 14.6 TiB visible with the original ESP and root volume intact.
+
+### 4. Secure Boot note
+
+On hosts without EFI variables the MOK key cannot be enrolled into the keyring, so the kernel prints
+`module verification failed: signature and/or required key missing` and taints (`P`=proprietary, `O`=OOT,
+`E`=unsigned). The module still loads; on a UEFI + Secure Boot host the `POST_BUILD` sign-file step in
+`dkms.conf` (and `mokutil --import`) is what makes the signature actually verify.
+
+### 5. Clean unload
+
+`sudo modprobe -r hptnvme` returns 0, releases `0b:00.0`, and re-releasing the members back to `nvme`
+restores `nvme0n1`–`nvme3n1` untouched.
+
+---
+
 ## Technical Architecture Matrix
 * **Target OpenSource Portal Boundary Link:** `https://www.highpoint-tech.com/disclaimer/ssd7000-linux-opensource-driver`
 * **Local System Workspace Anchor Path:** `/usr/src/hptnvme-1.6.22.0/`

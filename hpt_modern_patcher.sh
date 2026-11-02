@@ -188,7 +188,7 @@ if [[ "$INSTALL_CHOICE" =~ ^[Yy]$ ]]; then
     
     sudo tee "$DKMS_SOURCE_DIR/dkms-patch.sh" > /dev/null << 'INNER_EOF'
 #!/bin/bash
-TARGET="product/hptnvme/linux/.build/Makefile"
+TARGET="hpt_source/product/hptnvme/linux/.build/Makefile"
 if [ -f "$TARGET" ]; then
     sed -i '/hptnvme-objs/ s/$/ \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/him_nvme.o \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/ldm_raid.o/' "$TARGET"
     sed -i '/hptnvme-y/ s/$/ \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/him_nvme.o \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/ldm_raid.o/' "$TARGET"
@@ -199,12 +199,12 @@ INNER_EOF
     sudo tee "$DKMS_SOURCE_DIR/dkms.conf" > /dev/null << 'INNER_EOF'
 PACKAGE_NAME="hptnvme"
 PACKAGE_VERSION="1.6.22.0"
-CLEAN="make -C product/hptnvme/linux clean"
+CLEAN="make -C hpt_source/product/hptnvme/linux clean"
 PRE_BUILD="./dkms-patch.sh"
 BUILT_MODULE_NAME="hptnvme"
-BUILT_MODULE_LOCATION="product/hptnvme/linux/.build/"
+BUILT_MODULE_LOCATION="hpt_source/product/hptnvme/linux/"
 DEST_MODULE_LOCATION="/updates/kernel/drivers/nvme/host/"
-MAKE="make -C product/hptnvme/linux HPT_ROOT=${source_tree}/${PACKAGE_NAME}-${PACKAGE_VERSION} V=1"
+MAKE="make -C hpt_source/product/hptnvme/linux HPT_ROOT=${source_tree}/${PACKAGE_NAME}-${PACKAGE_VERSION}/hpt_source V=1"
 POST_BUILD="sudo /usr/src/linux-headers-${kernelver}/scripts/sign-file sha256 /var/lib/shim-signed/mok/MOK.priv /var/lib/shim-signed/mok/MOK.der ${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/${architecture}/module/hptnvme.ko"
 AUTOINSTALL="yes"
 INNER_EOF
