@@ -212,7 +212,21 @@ INNER_EOF
     sudo dkms add -m hptnvme -v 1.6.22.0
     sudo dkms build -m hptnvme -v 1.6.22.0
     sudo dkms install -m hptnvme -v 1.6.22.0
-    
+
+    # Rebuild the kernel boot images so the freshly installed module and the
+    # modprobe policy are baked into every installed kernel's initramfs.
+    if [ -d /etc/initramfs-tools ] && command -v update-initramfs >/dev/null 2>&1; then
+        if ! grep -qE '^hptnvme([[:space:]]|$)' /etc/initramfs-tools/modules 2>/dev/null; then
+            echo "-> Registering hptnvme in /etc/initramfs-tools/modules for initramfs inclusion..."
+            echo "hptnvme" | sudo tee -a /etc/initramfs-tools/modules > /dev/null
+        fi
+        echo "-> Rebuilding kernel images for all installed kernels..."
+        sudo update-initramfs -u -k all
+        echo "-> Kernel images rebuilt successfully."
+    else
+        echo "[!] update-initramfs not available - kernel images were NOT rebuilt."
+    fi
+
     echo "-> Module compilation complete."
     echo ""
     
