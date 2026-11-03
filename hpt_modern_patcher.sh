@@ -293,6 +293,21 @@ INNER_EOF
         echo "[!] update-initramfs not available - kernel images were NOT rebuilt."
     fi
 
+    # Regenerate the boot menu as well. A kernel installed since the last
+    # update-grub run has no entry, so a freshly built initramfs would be
+    # unreachable. Non-fatal on purpose: inside a chroot without /dev mounted,
+    # grub-probe cannot resolve the root device and this fails legitimately.
+    if command -v update-grub >/dev/null 2>&1; then
+        echo "-> Regenerating GRUB boot menu..."
+        if sudo update-grub; then
+            echo "-> GRUB boot menu regenerated."
+        else
+            echo "[!] update-grub failed - boot menu was NOT regenerated (in a chroot, check that /dev is mounted)."
+        fi
+    else
+        echo "[!] update-grub not available - boot menu was NOT regenerated."
+    fi
+
     echo "-> Module compilation complete."
     echo ""
     

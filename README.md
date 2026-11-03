@@ -253,6 +253,8 @@ What this proves, stage by stage:
 | Correct build output path | `.../build/hpt_source/product/hptnvme/linux/hptnvme.ko` (the `hpt_source/` prefix from the fix) |
 | Module signing | `Signing module ...` via `kmodsign` + MOK |
 | Install | `updates/dkms/hptnvme.ko.zst` + `Running depmod... done`, repeated per installed kernel |
+| Initramfs | `-> Rebuilding kernel images for all installed kernels...` |
+| Boot menu | `-> Regenerating GRUB boot menu...` → `-> GRUB boot menu regenerated.` |
 | Live load | `insmod ...` then `[05]–[08] probe controller` — all four member drives picked up by the driver |
 
 The last four `probe controller` lines are the definitive signal that the driver owns the members and is

@@ -153,6 +153,12 @@ a chroot); `POST_BUILD` was dropped (dkms signs via `kmodsign` itself); and the
 vendor Makeself payload is invoked with `DISPLAY` unset, which removes the
 `konsole` relaunch and makes non-interactive extraction work.
 
+After rebuilding the initramfs the patcher now runs `update-grub` as well. A
+kernel installed since the last `update-grub` has no menu entry, so a freshly
+built initramfs would be unreachable. The step is deliberately non-fatal: in a
+chroot without `/dev` bind-mounted, `grub-probe` cannot resolve the root device
+and `update-grub` fails legitimately.
+
 ## Chroot package maintenance — what dpkg needs there
 
 An `aptitude upgrade` inside the chroot failed to configure three packages.
