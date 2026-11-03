@@ -8,6 +8,7 @@ An automated, cross-generation out-of-tree kernel deployment utility for the Hig
 * **Deep Recursive Search Sweep:** Scans the user's entire home tree (`$HOME`) non-recursively for hidden paths to discover and stage vendor driver assets wherever they are saved (including active cloud mounts like Google Drive).
 * **DKMS Matrix & Secure Boot Integration:** Builds and installs for every kernel present in `/lib/modules` (skipping any without headers), preventing driver loss on downstream kernel upgrades, and signs out-of-tree binaries using local Machine Owner Keys (`kmodsign`).
 * **Live Memory Insertion:** Clears active block-layer structures, hot-unloads old driver definitions, and hooks the newly compiled payload live into the running system kernel storage map.
+* **Hot-Reload Safety Interlock:** Refuses that in-place unload/reload whenever any HighPoint array volume is mounted, so a host that boots *from* the array can never lose its live root filesystem to an `rmmod`.
 
 ---
 
@@ -276,6 +277,30 @@ With multiple kernels installed the DKMS stage now builds and installs one modul
 ```
 
 A kernel whose build fails is reported (`[!] Build failed for <kver>`) without aborting the run.
+
+---
+
+## Hot-Reload Safety
+
+When root lives on the HighPoint array, the optional "hot-reload the running system driver" step is the one
+operation that can destroy the machine: `rmmod hptnvme` removes the block device backing a mounted
+filesystem, and on such a host that filesystem is `/`.
+
+The script therefore probes the mount table through `array_holds_live_mounts()` before unloading anything and
+refuses when a mounted volume resolves to a `/dev/hptblock*` source:
+
+```bash
+if [[ "$LOAD_CHOICE" =~ ^[Yy]$ ]] && array_holds_live_mounts; then
+    echo "[!] Refusing to hot-reload: a HighPoint array volume is mounted, ..."
+    LOAD_CHOICE="n"
+fi
+```
+
+Build, install and initramfs rebuild all still run; only the in-place unload is skipped, and a reboot picks up
+the newly installed module. On a host whose root is on another disk and whose array volumes are all
+unmounted, the interlock passes and hot-reload behaves as before. The generated `dkms.conf` also sets
+`AUTOINSTALL="yes"` — without it dkms skips newly installed kernels, and a kernel without `hptnvme` cannot
+boot a machine whose root is on the array.
 
 ---
 

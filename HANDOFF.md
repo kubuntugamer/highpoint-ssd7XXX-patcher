@@ -17,6 +17,33 @@ SSD7505 HBA is present on **Skynet** (this machine) — items marked
 The array root is what must boot from the HighPoint RAID-0. The SATA root is
 only how you get a working machine to repair/build it.
 
+## 2026-11-03: the array root is now the boot device
+
+That target became the running system. `/` is `/dev/hptblock0n0p2` (xfs,
+`UUID=2c207cb7-1be6-43d2-8592-ed30457e2b13`), `/boot/efi` is
+`/dev/hptblock0n0p1`, and the cmdline carries `root=UUID=2c207cb7-…` plus
+`modprobe.blacklist=nvme`. Boot is itself the proof that `hptnvme` is in the
+initramfs: `/` cannot mount until it loads. The former SATA root is now
+`LABEL=kubuntu_2610`, unmounted spare.
+
+Boot log for this configuration (`journalctl -b 0 -k`, 15:35:28):
+`HighPoint NVMe RAID controller driver (G5) v1.6.22.0 block major fb`, probe
+lines for `[05]`–`[08]`, and **no** `nvme nvmeN: pci function` claims. All
+three kernels' initrds carry `updates/dkms/hptnvme.ko.zst` and
+`hptnvme-blacklist.conf` (the generic `nvme.ko` is present but blacklisted).
+
+Two consequences for the patcher:
+
+- **Hot-reload is refused.** `rmmod hptnvme` would drop the live root, so
+  `array_holds_live_mounts()` probes the mount table for `/dev/hptblock*` and
+  the script declines, telling the user to reboot. The old branch also ran
+  `sudo umount /dev/sd*`, which had nothing to do with the unload and could
+  remove an unrelated SATA volume; that line is gone.
+- **`AUTOINSTALL="yes"` is back in the generated `dkms.conf`.** dkms 3.x
+  `common.postinst` refuses to build a package without it ("does not have
+  AUTOINSTALL enabled"), so the next kernel installed would otherwise arrive
+  with no `hptnvme` — unbootable on this host.
+
 ## Verified state on the SATA root (kernel 7.3.0-10-generic)
 
 - Boot-time assembly works unattended: `hptnvme` loads from initramfs at

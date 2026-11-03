@@ -50,6 +50,21 @@ sudo mkdir -p "$DKMS_SOURCE_DIR"
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
+# Is any HighPoint array volume mounted right now? Every mounted volume on the
+# array is backed by the module currently in memory, so unloading the driver takes
+# that volume down with it - mid-write when it is the live root filesystem.
+array_holds_live_mounts() {
+    local sources
+    sources="$(findmnt -nro SOURCE 2>/dev/null || true)"
+    if [ -z "$sources" ]; then
+        sources="$(awk '{print $1}' /proc/mounts 2>/dev/null || true)"
+    fi
+    if printf '%s\n' "$sources" | grep -qE '^/dev/hptblock'; then
+        return 0
+    fi
+    return 1
+}
+
 # 2. Comprehensive Deep Recursive Scan Routine across all files and folders in $REAL_HOME
 find_staged_file_recursive() {
     find "$REAL_HOME" -type d \( -name ".*" -o -name "snap" \) -prune -o -type f \( -name "$TAR_FILE" -o -name "$BIN_FILE" \) -print 2>/dev/null | while read -r candidate; do
@@ -239,6 +254,10 @@ PRE_BUILD="./dkms-patch.sh"
 BUILT_MODULE_NAME="hptnvme"
 BUILT_MODULE_LOCATION="hpt_source/product/hptnvme/linux/"
 DEST_MODULE_LOCATION="/updates/kernel/drivers/nvme/host/"
+# AUTOINSTALL is what makes a newly installed kernel build this module at all:
+# dkms 3.x' common.postinst refuses to build a package that does not set it, and
+# here the array carries '/', so a kernel without hptnvme cannot boot.
+AUTOINSTALL="yes"
 # KERNELDIR must be passed explicitly: the vendor Makefile otherwise defaults it to
 # /lib/modules/$(uname -r)/build, which is the *running* kernel. That is wrong on
 # any multi-kernel box and fatal inside a chroot, where it names the host kernel.
@@ -319,8 +338,17 @@ INNER_EOF
         echo "[!] The running kernel ($(uname -r)) has no module from this run - skipping hot-reload."
         LOAD_CHOICE="n"
     fi
+    # A host whose root (or ESP, or data volumes) lives on the array must never
+    # hot-reload: rmmod hptnvme yanks the block device out from under a mounted
+    # filesystem, which on a boot-from-array system means the running root.
+    if [[ "$LOAD_CHOICE" =~ ^[Yy]$ ]] && array_holds_live_mounts; then
+        echo "[!] Refusing to hot-reload: a HighPoint array volume is mounted, so this"
+        echo "    driver is holding up a live filesystem (on a boot-from-array host that"
+        echo "    includes root itself). Unloading it here would take that mount down"
+        echo "    mid-write. The module is installed - reboot to load it instead."
+        LOAD_CHOICE="n"
+    fi
     if [[ "$LOAD_CHOICE" =~ ^[Yy]$ ]]; then
-        sudo umount /dev/sd* 2>/dev/null || true
         if lsmod | grep -q "hptnvme"; then sudo rmmod hptnvme; fi
         sudo modprobe -v hptnvme
         echo "========================================================================"
