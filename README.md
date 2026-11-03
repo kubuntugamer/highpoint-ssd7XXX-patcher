@@ -3,10 +3,10 @@
 An automated, cross-generation out-of-tree kernel deployment utility for the HighPoint SSD7505 controller. This tool dynamically diagnoses the system kernel environment baseline and automatically refactors unmaintained vendor source trees to ensure flawless compilation on modern Linux architectures.
 
 ## Key Features
-* **Multi-Kernel Branch Adaptation:** Automatically detects running kernel major releases, applying block-layer pointer translations (`struct gendisk *disk`) for modern Linux 7.x (Ubuntu 26.04 / Liquorix) while preserving native legacy geometry code lines for Linux 6.x branches (Ubuntu 25.10).
+* **Kernel-Version-Agnostic Patching:** The vendor tree is staged exactly as shipped. Each kernel API difference is resolved at build time by the DKMS pre-build hook, which reads *that kernel's own headers* and rewrites the affected signature accordingly. No version numbers are compared anywhere — not `uname -r`, not `LINUX_VERSION_CODE` — so one staged tree builds for 6.14, 6.17, 7.0 and 7.3 alike, including inside a chroot whose kernel is not the running one.
 * **Flexible Initialization & Bootstrap:** Self-symlinks globally on its very first run regardless of deployment method (`git clone`, ZIP archive extraction, or raw text copy-paste).
 * **Deep Recursive Search Sweep:** Scans the user's entire home tree (`$HOME`) non-recursively for hidden paths to discover and stage vendor driver assets wherever they are saved (including active cloud mounts like Google Drive).
-* **DKMS Matrix & Secure Boot Integration:** Automates module registration to prevent driver loss on downstream kernel upgrades, signing out-of-tree binaries using local Machine Owner Keys (`kmodsign`).
+* **DKMS Matrix & Secure Boot Integration:** Builds and installs for every kernel present in `/lib/modules` (skipping any without headers), preventing driver loss on downstream kernel upgrades, and signs out-of-tree binaries using local Machine Owner Keys (`kmodsign`).
 * **Live Memory Insertion:** Clears active block-layer structures, hot-unloads old driver definitions, and hooks the newly compiled payload live into the running system kernel storage map.
 
 ---
@@ -67,6 +67,55 @@ Before rebooting, you must inject and compile the patched driver tree into the f
    ```
 
 ---
+
+## Kernel Compatibility
+
+The driver touches two block-layer callbacks whose signatures changed between kernels. The patcher does **not** compare version numbers: when dkms builds for a kernel, a pre-build hook reads *that kernel's own headers* and rewrites the signatures to match. Any kernel whose headers fall into one of the two columns below therefore builds, including kernels released after this table was written.
+
+| What differs | Older form | Newer form | Decided by reading |
+|---|---|---|---|
+| `block_device_operations.getgeo()` first argument | `struct block_device *` | `struct gendisk *` | `include/linux/blkdev.h` |
+| `blk_mq_tag_set.init_request()` `numa_node` argument | `unsigned int` | `int` | `include/linux/blk-mq.h` |
+
+### Verified
+
+Every kernel below was compiled from the same staged vendor tree, with the signature pair the hook selected from that kernel's headers.
+
+| Kernel | Distribution | `getgeo` | `numa_node` | Evidence |
+|---|---|---|---|---|
+| `6.14.0-34` / `-35` / `-36` / `-37`-generic | Ubuntu 26.04 LTS | `block_device` | `unsigned int` | dkms build + install |
+| `6.17.0-22-generic` | Ubuntu 26.04 LTS | `block_device` | `unsigned int` | dkms build + install |
+| `7.0.0-14-generic` | Ubuntu 26.04 LTS | `gendisk` | `unsigned int` | dkms build + install, module in initramfs |
+| `7.0.0-15-generic` | Ubuntu 26.04 LTS | `gendisk` | `unsigned int` | dkms build + install, module in initramfs, was GRUB default on the array install |
+| `7.0.0-42-generic` | Ubuntu 26.04 LTS | `gendisk` | `unsigned int` | compiled (headers only — no kernel image) |
+| `7.3.0-10-generic` | Ubuntu 26.10 | `gendisk` | `int` | driver running in production; built and installed for a second host |
+
+Tested with dkms 3.2.2, building against a HighPoint SSD7505 RAID-0 (`1103:7505`, 4x Phison E12 members).
+
+### Expected to work, but not verified here
+
+These share one of the two verified signature pairs, so they should build; they were never actually compiled because the headers were not installed:
+
+- **Liquorix** `6.15.9`, `6.16.4`, `6.17.4`, `6.18.6` (`block_device` + `unsigned int`)
+- **Ubuntu 25.10** (`questing`, 6.17 family — the `6.17.0-22` row above is the same ABI)
+- Any `7.1`, `7.2`, `7.4`+ kernel: `7.0` and `7.3` bracket them, but neither was built
+- Any distribution kernel at `6.14`–`6.19` or `7.0`–`7.3`, provided matching `linux-headers` are installed
+
+### Not covered
+
+- **Kernels below 6.14** were never built (the 6.x rows start at 6.14; older kernels may have further API drift).
+- Kernels are only built where headers exist. The patcher skips any kernel in `/lib/modules` without a matching `linux-headers` package and says so, rather than failing the run.
+
+### If a future kernel fails
+
+Symptom — a hard error, not a warning, because GCC 14 treats it as one:
+
+```
+error: initialization of 'int (*)(struct gendisk *, struct hd_geometry *)' from
+incompatible pointer type 'int (*)(struct block_device *, struct hd_geometry *)'
+```
+
+Add another header probe and rewrite pair to the generated `dkms-patch.sh` (see the `getgeo` block for the pattern). Probe the header, never a version number — that is what keeps one staged tree valid for every kernel on the machine.
 
 ## Verified Diagnostics
 
@@ -144,8 +193,9 @@ $ sudo blkid /dev/hptblock8n0p2
 
 On hosts without EFI variables the MOK key cannot be enrolled into the keyring, so the kernel prints
 `module verification failed: signature and/or required key missing` and taints (`P`=proprietary, `O`=OOT,
-`E`=unsigned). The module still loads; on a UEFI + Secure Boot host the `POST_BUILD` sign-file step in
-`dkms.conf` (and `mokutil --import`) is what makes the signature actually verify.
+`E`=unsigned). The module still loads; on a UEFI + Secure Boot host the module is signed during install by
+dkms itself through `kmodsign` with the MOK, so enrolling that key (`mokutil --import`) is what makes the
+signature actually verify.
 
 ### 5. Clean unload
 
@@ -167,7 +217,7 @@ Detected Kernel Branch: Linux 7.x
 -> Staging discovered driver payload from: .../HighPoint_NVMe_G5_Linux_Src_v1.6.22.0_2025_11_10.tar.gz
 -> Unpacking compressed source archive payload...
 Verifying archive integrity... All good.
--> Modifying out-of-tree signatures for modern Linux 7.x APIs...
+-> Staging vendor sources (kernel API adaptation happens per kernel at build time)...
 Success! The driver tree is acquired, extracted, patched, and optimized.
 
 Would you like to instantly compile and install this driver into your running kernel via DKMS? (y/N): y
@@ -198,21 +248,32 @@ What this proves, stage by stage:
 |---|---|
 | Deep recursive payload discovery | `Staging discovered driver payload from: ...tar.gz` |
 | Nested makeself extraction | `Verifying archive integrity... All good.` |
-| Kernel-branch patching | `Modifying out-of-tree signatures for modern Linux 7.x APIs...` (7.x `gendisk` branch) |
+| Kernel-API patching | `Staging vendor sources (kernel API adaptation happens per kernel at build time)...` — each kernel's headers decide its own signature |
 | DKMS registration | symlink created, `pre_build` + `Building module(s)...... done` |
 | Correct build output path | `.../build/hpt_source/product/hptnvme/linux/hptnvme.ko` (the `hpt_source/` prefix from the fix) |
 | Module signing | `Signing module ...` via `kmodsign` + MOK |
-| Install | `updates/dkms/hptnvme.ko.zst` + `Running depmod... done` |
+| Install | `updates/dkms/hptnvme.ko.zst` + `Running depmod... done`, repeated per installed kernel |
 | Live load | `insmod ...` then `[05]–[08] probe controller` — all four member drives picked up by the driver |
 
 The last four `probe controller` lines are the definitive signal that the driver owns the members and is
 assembling the RAID-0; if they are absent after a hot-reload, the generic `nvme` driver still holds the
 endpoints (see the binding note in section 2).
 
-Two cosmetic warnings appear in every run and are harmless: `Warning: The post_build script is not
-executable` (dkms already signed the module itself, so the redundant `POST_BUILD` re-sign never runs), and
-`module verification failed ... - tainting kernel` (no EFI/Secure Boot on this host, so the MOK key is not
-in the keyring).
+One cosmetic warning appears in every run and is harmless: `module verification failed ... - tainting
+kernel` (no EFI/Secure Boot on this host, so the MOK key is not in the keyring).
+
+With multiple kernels installed the DKMS stage now builds and installs one module per kernel in
+`/lib/modules`, skipping any kernel without matching headers, so the non-running kernel stays bootable:
+
+```
+-> Building module for kernel 7.3.0-10-generic...
+-> Kernel 7.3.0-10-generic complete.
+-> Building module for kernel 7.3.0-9-generic...
+-> Kernel 7.3.0-9-generic complete.
+-> Rebuilding kernel images for all installed kernels...
+```
+
+A kernel whose build fails is reported (`[!] Build failed for <kver>`) without aborting the run.
 
 ---
 

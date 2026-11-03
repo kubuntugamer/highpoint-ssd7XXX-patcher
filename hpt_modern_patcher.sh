@@ -35,7 +35,7 @@ if [ ! -L "$GLOBAL_LINK_PATH" ] || [ "$(readlink "$GLOBAL_LINK_PATH")" != "$CURR
 fi
 
 # Everything below runs natively out of your pristine cloned repository directory context
-REPO_ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE}" )" && pwd )"
+REPO_ROOT_DIR="$( cd "$( dirname "$CURRENT_SCRIPT_SOURCE" )" && pwd )"
 DKMS_SOURCE_DIR="/usr/src/hptnvme-1.6.22.0"
 BIN_FILE="hptnvme_g5_linux_src_v1.6.22.0_2025_11_10.bin"
 TAR_FILE="HighPoint_NVMe_G5_Linux_Src_v1.6.22.0_2025_11_10.tar.gz"
@@ -43,7 +43,6 @@ TAR_FILE="HighPoint_NVMe_G5_Linux_Src_v1.6.22.0_2025_11_10.tar.gz"
 PORTAL_URL="https://www.highpoint-tech.com/disclaimer/ssd7000-linux-opensource-driver"
 FINAL_SOURCE_DIR="$DKMS_SOURCE_DIR/hpt_source"
 SCRATCH_DIR="$DKMS_SOURCE_DIR/hpt_archive_scratch"
-KERNEL_MAJOR=$(uname -r | cut -d. -f1)
 
 sudo mkdir -p "$DKMS_SOURCE_DIR"
 
@@ -72,7 +71,7 @@ echo "========================================================================"
 echo "Command Path: $GLOBAL_LINK_PATH"
 echo "Source Repository: $REPO_ROOT_DIR"
 echo "System Workspace: $DKMS_SOURCE_DIR"
-echo "Detected Kernel Branch: Linux ${KERNEL_MAJOR}.x"
+echo "Running Kernel: $(uname -r) (informational only - every kernel in /lib/modules is built)"
 echo ""
 
 # Run deep sweep pass 1
@@ -139,7 +138,10 @@ if [ "$ACTIVE_FORMAT" = "TAR" ]; then
     NESTED_BIN=$(find "$SCRATCH_DIR" -maxdepth 2 -name "$BIN_FILE" | head -n 1)
     if [ -f "$NESTED_BIN" ]; then
         sudo chmod +x "$NESTED_BIN"
-        sudo "$NESTED_BIN" --noexec --target "$SCRATCH_DIR/extracted"
+        # DISPLAY is dropped on purpose: with DISPLAY set and stdin not a TTY, this
+        # Makeself payload relaunches itself through konsole and silently extracts
+        # nothing. Without it, --noexec works the same in a terminal or a script.
+        sudo env -u DISPLAY "$NESTED_BIN" --noexec --target "$SCRATCH_DIR/extracted"
         TRUE_ROOT=$(find "$SCRATCH_DIR/extracted" -type d -name "osm" -exec dirname {} \; | head -n 1)
         [ -d "$TRUE_ROOT" ] && sudo cp -a "$TRUE_ROOT/." "$FINAL_SOURCE_DIR/" || sudo cp -a "$SCRATCH_DIR/extracted/." "$FINAL_SOURCE_DIR/"
     else
@@ -150,7 +152,7 @@ else
     echo "-> Unpacking raw executable setup payload..."
     sudo mkdir -p "$FINAL_SOURCE_DIR"
     sudo chmod +x "$BIN_FILE"
-    sudo ./"$BIN_FILE" --noexec --target "$FINAL_SOURCE_DIR"
+    sudo env -u DISPLAY ./"$BIN_FILE" --noexec --target "$FINAL_SOURCE_DIR"
 fi
 
 OSM_FILE="$FINAL_SOURCE_DIR/osm/linux/osm_linux.c"
@@ -161,15 +163,14 @@ if [ ! -f "$OSM_FILE" ] || [ ! -f "$MAKE_FILE" ]; then
     exit 1
 fi
 
-# 5. Kernel Patch Modification Loop
-if [ "$KERNEL_MAJOR" -eq 7 ]; then
-    echo "-> Modifying out-of-tree signatures for modern Linux 7.x APIs..."
-    sudo sed -i 's/int hpt_getgeo(struct block_device \*bdev, struct hd_geometry \*geo)/int hpt_getgeo(struct gendisk \*disk, struct hd_geometry \*geo)/g' "$OSM_FILE"
-    sudo sed -i 's/geo->cylinders = get_capacity(bdev->bd_disk) >> 11;/geo->cylinders = get_capacity(disk) >> 11;/g' "$OSM_FILE"
-    sudo sed -i 's/unsigned int hctx_idx, unsigned int numa_node/unsigned int hctx_idx, int numa_node/g' "$OSM_FILE"
-else
-    echo "-> Step 3: Linux 6.x branch detected. Skipping 7.x structural overrides..."
-fi
+# 5. Source tree preparation
+# The vendor sources are staged exactly as shipped. Kernel-API adaptation is NOT
+# decided here: it is done per kernel at build time by the DKMS pre-build hook,
+# which reads the headers of the kernel being built against and rewrites the two
+# signatures that differ. No version numbers are compared anywhere, so one staged
+# tree is valid for every kernel on the box, and for a chroot target whose kernel
+# is not the one running this script.
+echo "-> Staging vendor sources (kernel API adaptation happens per kernel at build time)..."
 
 sudo sed -i '/hptnvme-objs/ s/$/ \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/him_nvme.o \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/ldm_raid.o/' "$MAKE_FILE"
 sudo sed -i '/hptnvme-y/ s/$/ \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/him_nvme.o \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/ldm_raid.o/' "$MAKE_FILE"
@@ -188,6 +189,40 @@ if [[ "$INSTALL_CHOICE" =~ ^[Yy]$ ]]; then
     
     sudo tee "$DKMS_SOURCE_DIR/dkms-patch.sh" > /dev/null << 'INNER_EOF'
 #!/bin/bash
+# Runs from the DKMS build tree once per kernel, before make. Every kernel-API
+# difference is resolved by reading the headers of the kernel being built for --
+# never by comparing version numbers. The rewrites are symmetric, so this is safe
+# to run repeatedly and for any mix of kernels.
+KSRC="/lib/modules/${kernelver:-$(uname -r)}/build"
+OSM="hpt_source/osm/linux/osm_linux.c"
+
+if [ -f "$OSM" ] && [ -d "$KSRC" ]; then
+    # block_device_operations.getgeo(): takes struct block_device * on older
+    # kernels, struct gendisk * once the block layer passes the disk instead.
+    if grep -q 'int (\*getgeo)(struct gendisk' "$KSRC/include/linux/blkdev.h" 2>/dev/null; then
+        # scoped to the function body: 'disk->private_data' also appears elsewhere in
+        # this file, so an unscoped rewrite corrupts unrelated code.
+        sed -i -e '/^static int hpt_getgeo/,/^}/ s|struct block_device \*bdev, struct hd_geometry \*geo|struct gendisk *disk, struct hd_geometry *geo|' \
+            -e '/^static int hpt_getgeo/,/^}/ s|get_capacity(bdev->bd_disk)|get_capacity(disk)|' \
+            -e '/^static int hpt_getgeo/,/^}/ s|bdev->bd_disk->private_data|disk->private_data|' \
+            "$OSM"
+    else
+        sed -i -e '/^static int hpt_getgeo/,/^}/ s|struct gendisk \*disk, struct hd_geometry \*geo|struct block_device *bdev, struct hd_geometry *geo|' \
+            -e '/^static int hpt_getgeo/,/^}/ s|get_capacity(disk)|get_capacity(bdev->bd_disk)|' \
+            -e '/^static int hpt_getgeo/,/^}/ s|disk->private_data|bdev->bd_disk->private_data|' \
+            "$OSM"
+    fi
+
+    # blk_mq_tag_set.init_request(): the numa_node argument is unsigned int on
+    # older kernels and int on newer ones. Ask this kernel's own declaration.
+    if sed -n '/int (\*init_request)/,+1p' "$KSRC/include/linux/blk-mq.h" 2>/dev/null \
+        | tail -n 1 | tr -d ' \t' | grep -qE ',int\);$'; then
+        sed -i 's|unsigned int hctx_idx, unsigned int numa_node)|unsigned int hctx_idx, int numa_node)|' "$OSM"
+    else
+        sed -i 's|unsigned int hctx_idx, int numa_node)|unsigned int hctx_idx, unsigned int numa_node)|' "$OSM"
+    fi
+fi
+
 TARGET="hpt_source/product/hptnvme/linux/.build/Makefile"
 if [ -f "$TARGET" ]; then
     sed -i '/hptnvme-objs/ s/$/ \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/him_nvme.o \$(HPT_ROOT)\/lib\/linux\/free-x86_64\/ldm_raid.o/' "$TARGET"
@@ -204,14 +239,45 @@ PRE_BUILD="./dkms-patch.sh"
 BUILT_MODULE_NAME="hptnvme"
 BUILT_MODULE_LOCATION="hpt_source/product/hptnvme/linux/"
 DEST_MODULE_LOCATION="/updates/kernel/drivers/nvme/host/"
-MAKE="make -C hpt_source/product/hptnvme/linux HPT_ROOT=${source_tree}/${PACKAGE_NAME}-${PACKAGE_VERSION}/hpt_source V=1"
-POST_BUILD="sudo /usr/src/linux-headers-${kernelver}/scripts/sign-file sha256 /var/lib/shim-signed/mok/MOK.priv /var/lib/shim-signed/mok/MOK.der ${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/${architecture}/module/hptnvme.ko"
-AUTOINSTALL="yes"
+# KERNELDIR must be passed explicitly: the vendor Makefile otherwise defaults it to
+# /lib/modules/$(uname -r)/build, which is the *running* kernel. That is wrong on
+# any multi-kernel box and fatal inside a chroot, where it names the host kernel.
+# HPT_ROOT points at the DKMS build copy, not at the /usr/src source tree: that is
+# the tree the pre_build hook adapts for this kernel, so the sources it rewrites are
+# the sources make actually compiles.
+MAKE="make -C hpt_source/product/hptnvme/linux HPT_ROOT=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build/hpt_source KERNELDIR=/lib/modules/${kernelver}/build V=1"
 INNER_EOF
 
-    sudo dkms add -m hptnvme -v 1.6.22.0
-    sudo dkms build -m hptnvme -v 1.6.22.0
-    sudo dkms install -m hptnvme -v 1.6.22.0
+    # Register the source tree only. 'dkms add' is not told which kernel to use,
+    # so it would otherwise fall back to 'uname -r' and try to build for it. That
+    # kernel is the running one, which inside a chroot (installing to a disk that
+    # is not the host) has no headers and no reason to be built at all.
+    sudo dkms add -m hptnvme -v 1.6.22.0 || echo "[!] dkms add reported an error - continuing, the source tree is registered either way."
+
+    # Build for every installed kernel, not just the running one. The
+    # 'dkms remove --all' above deleted the builds for the other kernels, so
+    # they would otherwise be left with an initramfs that lists hptnvme but no
+    # module to load it for them.
+    BUILT_KERNELS=""
+    for KERNEL_DIR in /lib/modules/*; do
+        TARGET_KERNEL="$(basename "$KERNEL_DIR")"
+        if [ ! -e "$KERNEL_DIR/build" ]; then
+            echo "[!] Skipping $TARGET_KERNEL - no kernel headers (linux-headers-$TARGET_KERNEL)."
+            continue
+        fi
+        echo "-> Building module for kernel $TARGET_KERNEL..."
+        if sudo dkms build -m hptnvme -v 1.6.22.0 -k "$TARGET_KERNEL" \
+            && sudo dkms install -m hptnvme -v 1.6.22.0 -k "$TARGET_KERNEL"; then
+            echo "-> Kernel $TARGET_KERNEL complete."
+            BUILT_KERNELS="$BUILT_KERNELS $TARGET_KERNEL"
+        else
+            echo "[!] Build failed for $TARGET_KERNEL - that kernel will boot without hptnvme."
+        fi
+    done
+
+    if [ -z "$BUILT_KERNELS" ]; then
+        echo "[!] No kernel was built at all - install the matching linux-headers package(s)."
+    fi
 
     # Rebuild the kernel boot images so the freshly installed module and the
     # modprobe policy are baked into every installed kernel's initramfs.
@@ -231,6 +297,13 @@ INNER_EOF
     echo ""
     
     read -p "Would you like to hot-reload the running system driver into memory right now? (y/N): " LOAD_CHOICE
+    # Hot-reloading only makes sense for the running kernel, and only if it is one
+    # of the kernels this run actually built for (it is not, when running inside a
+    # chroot against a different installed system).
+    if [[ "$LOAD_CHOICE" =~ ^[Yy]$ ]] && [[ " $BUILT_KERNELS " != *" $(uname -r) "* ]]; then
+        echo "[!] The running kernel ($(uname -r)) has no module from this run - skipping hot-reload."
+        LOAD_CHOICE="n"
+    fi
     if [[ "$LOAD_CHOICE" =~ ^[Yy]$ ]]; then
         sudo umount /dev/sd* 2>/dev/null || true
         if lsmod | grep -q "hptnvme"; then sudo rmmod hptnvme; fi
