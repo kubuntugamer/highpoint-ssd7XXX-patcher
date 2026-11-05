@@ -80,6 +80,132 @@ find_staged_file_recursive() {
     done
 }
 
+# -------------------------------------------------------------------------
+# Build prerequisites.
+# A Live USB session boots a kernel but ships no compiler, no dkms and no
+# headers, so dkms has nothing to build against and the run dies at the first
+# build. This installs whatever is missing using the package manager of the
+# distribution that is actually running -- the live media itself, or a target
+# system reached through chroot.
+# -------------------------------------------------------------------------
+PKG_MGR=""
+APT_REFRESH_DONE=0
+
+detect_pkg_mgr() {
+    if command -v apt-get >/dev/null 2>&1; then PKG_MGR="apt"
+    elif command -v dnf >/dev/null 2>&1; then PKG_MGR="dnf"
+    elif command -v yum >/dev/null 2>&1; then PKG_MGR="yum"
+    elif command -v pacman >/dev/null 2>&1; then PKG_MGR="pacman"
+    elif command -v zypper >/dev/null 2>&1; then PKG_MGR="zypper"
+    else PKG_MGR=""
+    fi
+}
+
+# Package that provides /lib/modules/<release>/build, per distribution.
+kernel_headers_pkg() {
+    [ -n "$PKG_MGR" ] || detect_pkg_mgr
+    case "$PKG_MGR" in
+        apt)     echo "linux-headers-$1" ;;
+        dnf|yum) echo "kernel-devel-$1" ;;
+        zypper)  echo "kernel-devel-$1" ;;
+        pacman)  echo "linux-headers" ;;
+    esac
+}
+
+pkg_install() {
+    [ -n "$PKG_MGR" ] || detect_pkg_mgr
+    case "$PKG_MGR" in
+        apt)
+            # Live media ships empty apt lists, so an install without a refresh
+            # fails with "Unable to locate package". Refresh once per run.
+            if [ "$APT_REFRESH_DONE" = 0 ]; then
+                APT_REFRESH_DONE=1
+                if ! ls /var/lib/apt/lists/ 2>/dev/null | grep -q 'Packages'; then
+                    echo "-> Refreshing package metadata (live media boots with empty apt lists)..."
+                    if ! sudo apt-get update; then
+                        echo "[!] apt-get update failed - no network, or this live media's sources are unusable."
+                        return 1
+                    fi
+                fi
+            fi
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+            ;;
+        dnf|yum) sudo "$PKG_MGR" install -y "$@" ;;
+        pacman)  sudo pacman -Sy --noconfirm "$@" ;;
+        zypper)  sudo zypper --non-interactive install "$@" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Make one kernel buildable, installing its headers if they are absent.
+ensure_kernel_headers() {
+    local kver="$1" hdr
+    [ -e "/lib/modules/$kver/build" ] && return 0
+    # pacman has a single unversioned linux-headers package, so it can only
+    # install headers for the kernel that is running right now.
+    if [ "$PKG_MGR" = "pacman" ] && [ "$kver" != "$(uname -r)" ]; then
+        return 1
+    fi
+    hdr="$(kernel_headers_pkg "$kver")"
+    [ -n "$hdr" ] || return 1
+    echo "-> Missing headers for $kver - installing $hdr..."
+    pkg_install "$hdr" || echo "[!] Could not install $hdr."
+    [ -e "/lib/modules/$kver/build" ]
+}
+
+ensure_build_prerequisites() {
+    local kver hdr pkgs=()
+    kver="$(uname -r)"
+
+    if command -v gcc >/dev/null 2>&1 && command -v make >/dev/null 2>&1 \
+        && command -v dkms >/dev/null 2>&1 && [ -e "/lib/modules/$kver/build" ]; then
+        echo "-> Build prerequisites already present (gcc, make, dkms, headers for $kver)."
+        return 0
+    fi
+
+    echo "------------------------------------------------------------------------"
+    echo "[!] Building the driver needs a compiler, dkms and the headers of the"
+    echo "    kernel it is built for. Installing whatever is missing..."
+    echo "------------------------------------------------------------------------"
+
+    detect_pkg_mgr
+    if [ -z "$PKG_MGR" ]; then
+        echo "[!] No supported package manager found (apt, dnf, yum, pacman, zypper)."
+        return 1
+    fi
+
+    if ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+        case "$PKG_MGR" in
+            apt)    pkgs+=(build-essential) ;;
+            pacman) pkgs+=(base-devel) ;;
+            *)      pkgs+=(gcc make) ;;
+        esac
+    fi
+    command -v dkms >/dev/null 2>&1 || pkgs+=(dkms)
+
+    if [ ${#pkgs[@]} -gt 0 ]; then
+        echo "-> Installing build toolchain: ${pkgs[*]}"
+        pkg_install "${pkgs[@]}" || echo "[!] Installing ${pkgs[*]} failed - the header step below decides the outcome."
+    fi
+
+    if [ ! -e "/lib/modules/$kver/build" ]; then
+        hdr="$(kernel_headers_pkg "$kver")"
+        echo "-> Installing kernel headers: $hdr"
+        if pkg_install "$hdr" && [ -e "/lib/modules/$kver/build" ]; then
+            echo "-> Headers for $kver installed."
+            return 0
+        fi
+        echo "[!] Could not install headers for the running kernel ($kver)."
+        echo "    A live ISO kernel is not always published as a headers package."
+        echo "    The driver tree stays staged in $DKMS_SOURCE_DIR - compile it from"
+        echo "    the installed system, or from its chroot, where headers exist."
+        return 1
+    fi
+
+    echo "-> Headers for $kver are present."
+    return 0
+}
+
 echo "========================================================================"
 echo "    HighPoint SSD7505 Linux Multi-Kernel Adaptive Deployment Tool"
 echo "========================================================================"
@@ -199,6 +325,16 @@ echo ""
 read -p "Would you like to instantly compile and install this driver into your running kernel via DKMS? (y/N): " INSTALL_CHOICE
 
 if [[ "$INSTALL_CHOICE" =~ ^[Yy]$ ]]; then
+    # Live media, and fresh installs reached through chroot, usually have no
+    # compiler, no dkms and no kernel headers at all. Without this the run dies
+    # in the middle of the DKMS stage instead of saying what is missing.
+    if ! ensure_build_prerequisites; then
+        echo ""
+        echo "[!] Skipping the DKMS stage: this system cannot build the module yet."
+        echo "    Re-run the patcher once the packages listed above are installed."
+        exit 1
+    fi
+
     echo "-> Registering framework parameters to system DKMS matrix..."
     sudo dkms remove -m hptnvme -v 1.6.22.0 --all 2>/dev/null || true
     
@@ -280,8 +416,8 @@ INNER_EOF
     BUILT_KERNELS=""
     for KERNEL_DIR in /lib/modules/*; do
         TARGET_KERNEL="$(basename "$KERNEL_DIR")"
-        if [ ! -e "$KERNEL_DIR/build" ]; then
-            echo "[!] Skipping $TARGET_KERNEL - no kernel headers (linux-headers-$TARGET_KERNEL)."
+        if [ ! -e "$KERNEL_DIR/build" ] && ! ensure_kernel_headers "$TARGET_KERNEL"; then
+            echo "[!] Skipping $TARGET_KERNEL - no kernel headers ($(kernel_headers_pkg "$TARGET_KERNEL"))."
             continue
         fi
         echo "-> Building module for kernel $TARGET_KERNEL..."

@@ -40,7 +40,7 @@ If you are booting from a temporary Live Linux USB environment to install your o
    ```bash
    chmod +x hpt_modern_patcher.sh && ./hpt_modern_patcher.sh
    ```
-3. Complete the prompt sequence. Your HighPoint RAID block devices will instantly register and mount live inside the storage installer pool interface.
+3. Complete the prompt sequence. When you accept the compile step, the patcher first installs whatever is missing from the distro running the live session — the compiler (`build-essential` / `gcc` + `make`), `dkms`, and `linux-headers-$(uname -r)` (`kernel-devel-$(uname -r)` on RPM distros) — so **the live media needs network access**. Live media boots with empty apt lists, so `apt-get update` is run first when needed. If the ISO's kernel has no published headers package, the patcher says so and leaves the staged tree for the chroot phase instead of failing mid-build. Your HighPoint RAID block devices will then register and mount live inside the storage installer pool interface.
 4. Run your operating system installation to completion target devices. **CRITICAL: Do not click the prompt to restart the machine when the installer finishes.**
 
 ### Phase 2: Securely Patching the Newly Installed Target System (Chroot Handoff)
@@ -105,7 +105,7 @@ These share one of the two verified signature pairs, so they should build; they 
 ### Not covered
 
 - **Kernels below 6.14** were never built (the 6.x rows start at 6.14; older kernels may have further API drift).
-- Kernels are only built where headers exist. The patcher skips any kernel in `/lib/modules` without a matching `linux-headers` package and says so, rather than failing the run.
+- Kernels are only built where headers exist. Before skipping, the patcher tries to install the matching headers package for that kernel (`linux-headers-<kver>` / `kernel-devel-<kver>`); it skips the kernel only if no such package exists or cannot be installed, rather than failing the run.
 
 ### If a future kernel fails
 
